@@ -48,6 +48,7 @@ import { buildApiHandler } from "../../api"
 import { Task, TaskOptions } from "../task/Task"
 import { getNonce } from "./getNonce"
 import { getUri } from "./getUri"
+import { ResourceInliner } from "./ResourceInliner"
 import { getSystemPromptFilePath } from "../prompts/sections/custom-system-prompt"
 import { telemetryService } from "../../services/telemetry/TelemetryService"
 import { getWorkspacePath } from "../../utils/path"
@@ -377,7 +378,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 		webviewView.webview.html =
 			this.contextProxy.extensionMode === vscode.ExtensionMode.Development
 				? await this.getHMRHtmlContent(webviewView.webview)
-				: this.getHtmlContent(webviewView.webview)
+				: await this.getHtmlContentWithInlining(webviewView.webview)
 
 		// Sets up an event listener to listen for messages passed from the webview view context
 		// and executes code based on the message that is recieved
@@ -560,7 +561,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 		} catch (error) {
 			vscode.window.showErrorMessage(t("common:errors.hmr_not_running"))
 
-			return this.getHtmlContent(webview)
+			return await this.getHtmlContentWithInlining(webview)
 		}
 
 		const nonce = getNonce()
@@ -580,6 +581,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 		])
 		const imagesUri = getUri(webview, this.contextProxy.extensionUri, ["assets", "images"])
 		const audioUri = getUri(webview, this.contextProxy.extensionUri, ["webview-ui", "audio"])
+		const fontsUri = getUri(webview, this.contextProxy.extensionUri, ["assets", "codicons"])
 
 		const file = "src/index.tsx"
 		const scriptUri = `http://${localServerUrl}/${file}`
@@ -596,7 +598,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 
 		const csp = [
 			"default-src 'none'",
-			`font-src ${webview.cspSource}`,
+			`font-src ${webview.cspSource} data:`,
 			`style-src ${webview.cspSource} 'unsafe-inline' https://* http://${localServerUrl} http://0.0.0.0:${localPort}`,
 			`img-src ${webview.cspSource} data:`,
 			`media-src ${webview.cspSource}`,
@@ -617,6 +619,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 						window.IMAGES_BASE_URI = "${imagesUri}"
 						window.AUDIO_BASE_URI = "${audioUri}"
 						window.MATERIAL_ICONS_BASE_URI = "${materialIconsUri}"
+						window.FONTS_BASE_URI = "${fontsUri}"
 					</script>
 					<title>Roo Code</title>
 				</head>
@@ -640,6 +643,80 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 	 * @returns A template string literal containing the HTML that should be
 	 * rendered within the webview panel
 	 */
+	/**
+	 * Generate HTML content for the webview with critical resources inlined to avoid CORS/CORP issues.
+	 * This method addresses Cross-Origin Resource Policy violations in Firefox/Safari when accessing
+	 * VS Code through tunnels by embedding CSS and converting images to data URIs.
+	 *
+	 * @param webview The webview instance to generate HTML for
+	 * @returns Promise resolving to HTML string with inlined resources
+	 */
+	private async getHtmlContentWithInlining(webview: vscode.Webview): Promise<string> {
+		const resourceInliner = new ResourceInliner(this.contextProxy.extensionUri)
+
+		// For non-critical resources, still use URIs as fallback
+		const scriptUri = getUri(webview, this.contextProxy.extensionUri, ["webview-ui", "build", "assets", "index.js"])
+		const materialIconsUri = getUri(webview, this.contextProxy.extensionUri, [
+			"assets",
+			"vscode-material-icons",
+			"icons",
+		])
+		const imagesUri = getUri(webview, this.contextProxy.extensionUri, ["assets", "images"])
+		const audioUri = getUri(webview, this.contextProxy.extensionUri, ["webview-ui", "audio"])
+		const fontsUri = getUri(webview, this.contextProxy.extensionUri, ["assets", "codicons"])
+
+		// Inline critical CSS to avoid CORS/CORP issues
+		const inlinedCSS = await resourceInliner.inlineCss(["webview-ui", "build", "assets", "index.css"])
+		const inlinedCodeicons = await resourceInliner.inlineCss(["assets", "codicons", "codicon.css"])
+
+		// Get data URIs for critical images
+		const inlinedResources = await resourceInliner.getInlinedResourcesData()
+
+		const nonce = getNonce()
+
+		return /*html*/ `
+	       <!DOCTYPE html>
+	       <html lang="en">
+	         <head>
+	           <meta charset="utf-8">
+	           <meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no">
+	           <meta name="theme-color" content="#000000">
+	           <meta http-equiv="Cross-Origin-Resource-Policy" content="cross-origin">
+	           <meta http-equiv="Content-Security-Policy" content="default-src 'none'; font-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; img-src ${webview.cspSource} data:; media-src ${webview.cspSource}; script-src ${webview.cspSource} 'wasm-unsafe-eval' 'nonce-${nonce}' https://us-assets.i.posthog.com 'strict-dynamic'; connect-src https://openrouter.ai https://api.requesty.ai https://us.i.posthog.com https://us-assets.i.posthog.com">
+	           
+	           <!-- Inlined CSS to avoid CORS/CORP issues in Firefox/Safari -->
+	           ${inlinedCSS}
+	           ${inlinedCodeicons}
+	           
+			<script nonce="${nonce}">
+				// Provide both base URIs for fallback and inlined data URIs for critical resources
+				window.IMAGES_BASE_URI = "${imagesUri}"
+				window.AUDIO_BASE_URI = "${audioUri}"
+				window.MATERIAL_ICONS_BASE_URI = "${materialIconsUri}"
+				window.FONTS_BASE_URI = "${fontsUri}"
+				
+				// Inlined critical image data URIs
+				window.INLINED_RESOURCES = {
+					"roo-logo.svg": "${inlinedResources.rooLogoSvg}",
+					"openrouter.png": "${inlinedResources.openrouterPng}",
+					"requesty.png": "${inlinedResources.requestyPng}",
+					"codicon.ttf": "${inlinedResources.codiconTtf}",
+					"notification.wav": "${inlinedResources.notificationWav}",
+					"celebration.wav": "${inlinedResources.celebrationWav}",
+					"progress_loop.wav": "${inlinedResources.progressLoopWav}"
+				}
+			</script>
+	           <title>Roo Code</title>
+	         </head>
+	         <body>
+	           <noscript>You need to enable JavaScript to run this app.</noscript>
+	           <div id="root"></div>
+	           <script nonce="${nonce}" type="module" src="${scriptUri}"></script>
+	         </body>
+	       </html>
+	     `
+	}
+
 	private getHtmlContent(webview: vscode.Webview): string {
 		// Get the local path to main script run in the webview,
 		// then convert it to a uri we can use in the webview.
@@ -1301,7 +1378,7 @@ export class ClineProvider extends EventEmitter<ClineProviderEvents> implements 
 			mcpEnabled: mcpEnabled ?? true,
 			enableMcpServerCreation: enableMcpServerCreation ?? true,
 			alwaysApproveResubmit: alwaysApproveResubmit ?? false,
-			requestDelaySeconds: requestDelaySeconds ?? 10,
+			requestDelaySeconds: Math.max(5, requestDelaySeconds ?? 10),
 			currentApiConfigName: currentApiConfigName ?? "default",
 			listApiConfigMeta: listApiConfigMeta ?? [],
 			pinnedApiConfigs: pinnedApiConfigs ?? {},
