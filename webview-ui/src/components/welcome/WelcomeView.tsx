@@ -29,9 +29,12 @@ const WelcomeView = () => {
 	}, [apiConfiguration, currentApiConfigName])
 
 	// Using a lazy initializer so it reads once at mount
-	const [imagesBaseUri] = useState(() => {
+	const [resources] = useState(() => {
 		const w = window as any
-		return w.IMAGES_BASE_URI || ""
+		return {
+			imagesBaseUri: w.IMAGES_BASE_URI || "",
+			inlinedResources: w.INLINED_RESOURCES || {},
+		}
 	})
 
 	return (
@@ -82,7 +85,10 @@ const WelcomeView = () => {
 									<div className="font-bold">{provider.name}</div>
 									<div className="w-16 h-16 flex items-center justify-center rounded m-2 overflow-hidden relative">
 										<img
-											src={`${imagesBaseUri}/${provider.slug}.png`}
+											src={
+												resources.inlinedResources[`${provider.slug}.png`] ||
+												`${resources.imagesBaseUri}/${provider.slug}.png`
+											}
 											alt={provider.name}
 											className="w-full h-full object-contain p-2"
 										/>
